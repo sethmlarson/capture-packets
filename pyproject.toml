@@ -8,8 +8,12 @@ authors = [{name = "Seth Michael Larson", email = "sethmichaellarson@gmail.com"}
 readme = "README.md"
 license = {file = "LICENSE"}
 classifiers = ["License :: OSI Approved :: MIT License"]
-requires-python = ">=3.6"
+requires-python = ">=3.7"
 dynamic = ["version", "description"]
+dependencies = [
+    "scapy>=2.4.5",
+    "cryptography<37"
+]
 
 [project.urls]
 Home = "https://github.com/sethmlarson/capture-packets"

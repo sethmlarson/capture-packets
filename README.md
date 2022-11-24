@@ -35,15 +35,11 @@ with capture_packets() as pcap:
 
     # By the way, it's okay if an error happens in here. The
     # context manager still works and outputs the paths to stdout.
-```
 
-If you run the above script you'll get the following output after a few seconds:
-
-```
-Waiting for packet capture to start...
-Capturing packets...
-Stopping dumpcap...
-Captured packets available at: /tmp/tmpcaxb58kt/captured-packets.tar
+# After capturing you can explore the captured packets:
+from scapy.layers.dns import DNSQR
+packets = pcap.packets(layers=DNSQR)
+assert packets[0][DNSQR].qname == b"service-that-is-not.working."
 ```
 
 Once you see the last message your packets have been captured and are stored at the displayed path (in the above example, at `/tmp/tmpcaxb58kt/captured-packets.tar`). You can send the tarball to the maintainer requesting packets.

@@ -1,42 +1,90 @@
 """User-friendly packet captures"""
 
+from __future__ import annotations
+
 import contextlib
 import os
 import subprocess
-import tarfile
 import tempfile
 import time
 import typing
-from collections import namedtuple
+from functools import lru_cache
 
-__version__ = "0.1.1"
-__all__ = ["capture_packets", "CapturePackets"]
+from scapy.all import TCPSession, load_layer, sniff
+from scapy.config import conf
+from scapy.packet import Packet
+
+load_layer("tls")
+
+__version__ = "0.1.2"
+__all__ = ["capture_packets", "CapturedPackets"]
 
 
-CapturePackets = namedtuple(
-    "CapturePackets", ["keylog_filename", "output"]
-)
+class CapturedPackets:
+    def __init__(self, *, pcap_filepath: str, keylog_filepath: str):
+        self._pcap_filepath = pcap_filepath
+        self._keylog_filepath = keylog_filepath
+        self._capturing = True
+        self._packets: list[Packet] | None = None
+
+    @property
+    def pcap_filepath(self) -> str:
+        return self._pcap_filepath
+
+    @property
+    def keylog_filepath(self) -> str:
+        return self._keylog_filepath
+
+    def packets(
+        self, *, layers: typing.Type[Packet] | list[typing.Type[Packet]] | None = None
+    ) -> list[Packet]:
+        if self._capturing:
+            raise RuntimeError("Can't call .packets() while actively capturing")
+        if self._packets is None:
+            # Configure TLS application data decryption.
+            conf.tls_session_enable = True
+            conf.tls_nss_filename = self.keylog_filepath
+
+            self._packets = list(sniff(offline=self.pcap_filepath, session=TCPSession))
+        packets = self._packets
+        if layers is not None:
+            if not isinstance(layers, list):
+                layers = [layers]
+            packets = [
+                packet
+                for packet in packets
+                if any(packet.haslayer(layer) for layer in layers)
+            ]
+        return packets
 
 
 @contextlib.contextmanager
-def capture_packets(interfaces: typing.List[str] = None) -> CapturePackets:
-    """Runs dumpcap in the background while network activity happens"""
+def capture_packets(
+    *,
+    interfaces: list[str] | None = None,
+    wait_for_packets: bool = True,
+    wait_before_terminate: float = 1.0,
+) -> typing.Generator[CapturedPackets, None, None]:
+    """Runs dumpcap in the background while network activity happens.
+
+    :param interfaces: List of interfaces to listen to. Defaults to all interfaces.
+    :param wait_for_packets:
+        If true waits for packets to show up in the packet capture before yielding
+        to the code within the context manager. There is almost always network
+        activity happening in the background of a machine so this is a good
+        way to ensure that packet capture has started before running the desired code.
+        Defaults to true.
+    :param wait_before_terminate:
+        Number of seconds to wait after signalling the end of packet capture
+        but before terminating the dumpcap process. Sometimes packets can take
+        a bit to show up in the packet capture so this is done for consistency.
+    """
 
     # Figure out which interfaces we're going to listen to.
     # Default is to listen to them all, but if we see 'any'
     # then we stick with that since it covers them all.
     if interfaces is None:
-        interfaces = [
-            line.split(" ")[1]
-            for line in subprocess.check_output(
-                "dumpcap -D", shell=True, stderr=subprocess.DEVNULL
-            )
-            .decode()
-            .split("\n")
-            if line.strip()
-        ]
-        if "any" in interfaces:
-            interfaces = ["any"]
+        interfaces = _default_interfaces()
 
     # Create the temporary results directory
     tmp = tempfile.mkdtemp()
@@ -47,11 +95,7 @@ def capture_packets(interfaces: typing.List[str] = None) -> CapturePackets:
     os.environ["SSLKEYLOGFILE"] = keylog_filename
     open(keylog_filename, "w").close()  # Touch the file!
 
-    # Create the tarball
-    output_path = os.path.join(tmp, "captured-packets.tar")
-    with tarfile.open(output_path, mode="w") as output_tar, open(
-        pcap_path, mode="w"
-    ) as pcap_fd:
+    with open(pcap_path, mode="w") as pcap_fd:
 
         # Let the packet dumping, commence!
         popen = subprocess.Popen(
@@ -63,30 +107,38 @@ def capture_packets(interfaces: typing.List[str] = None) -> CapturePackets:
 
         try:
             # Wait for time to pass or for packets to start being dumped.
-            print("Waiting for packet capture to start...")
-            start = time.time()
-            while time.time() - start < 3 and os.stat(pcap_path).st_size == 0:
-                time.sleep(0.1)
+            if wait_for_packets:
+                start = time.time()
+                while time.time() - start < 3 and os.stat(pcap_path).st_size == 0:
+                    time.sleep(0.1)
 
-            print("Capturing packets...")
-            yield CapturePackets(
-                keylog_filename=keylog_filename,
-                output=output_path,
+            pcap = CapturedPackets(
+                keylog_filepath=keylog_filename, pcap_filepath=pcap_path
             )
-
-            # Wait for some time after to ensure
-            # the packets make it onto the disk.
-            time.sleep(3)
+            yield pcap
         finally:
             # Clean up the subprocess
-            print("Stopping dumpcap...")
+            time.sleep(wait_before_terminate)
             popen.terminate()
             while popen.poll() is None:
                 time.sleep(0.1)
 
-            # Add all the files to the tarball
-            for path in (keylog_filename, pcap_path):
-                output_tar.add(path, os.path.basename(path))
-                os.remove(path)
+            # Mark the pcap as complete so it can be inspected.
+            pcap._capturing = False
 
-            print(f"Captured packets available at: {output_path}")
+
+@lru_cache(1)
+def _default_interfaces() -> list[str]:
+    """Helper function which calls and caches the default interfaces for a system"""
+    interfaces = [
+        line.split(" ")[1]
+        for line in subprocess.check_output(
+            "dumpcap -D", shell=True, stderr=subprocess.DEVNULL
+        )
+        .decode()
+        .split("\n")
+        if line.strip()
+    ]
+    if "any" in interfaces:
+        return ["any"]
+    return interfaces
