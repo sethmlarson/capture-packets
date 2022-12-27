@@ -1,0 +1,8 @@
+pytest
+urllib3
+scapy
+build
+twine
+black
+isort
+nox

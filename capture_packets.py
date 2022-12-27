@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import subprocess
+import tarfile
 import tempfile
 import time
 import typing
@@ -17,7 +18,7 @@ from scapy.packet import Packet
 load_layer("tls")
 
 __version__ = "0.1.2"
-__all__ = ["capture_packets", "CapturedPackets"]
+__all__ = ["available_interfaces", "capture_packets", "CapturedPackets"]
 
 
 class CapturedPackets:
@@ -34,6 +35,23 @@ class CapturedPackets:
     @property
     def keylog_filepath(self) -> str:
         return self._keylog_filepath
+
+    def tarball(self, path: str | None = None, *, gzip: bool = True) -> str:
+        """Combine all file artifacts from this packet capture into a tarball"""
+        if self._capturing:
+            raise RuntimeError("Can't call .packets() while actively capturing")
+
+        if path is None:
+            path = f"{tempfile.mktemp()}.tar.gz"
+
+        tarfile_mode = "w:gz" if gzip else "w"
+        with tarfile.open(path, mode=tarfile_mode) as tar:
+            for filepath in (
+                self.pcap_filepath,
+                self.keylog_filepath,
+            ):
+                tar.add(filepath, arcname=os.path.basename(filepath))
+        return path
 
     def packets(
         self, *, layers: typing.Type[Packet] | list[typing.Type[Packet]] | None = None
@@ -63,7 +81,7 @@ def capture_packets(
     *,
     interfaces: list[str] | None = None,
     wait_for_packets: bool = True,
-    wait_before_terminate: float = 1.0,
+    wait_before_terminate: float = 3.0,
 ) -> typing.Generator[CapturedPackets, None, None]:
     """Runs dumpcap in the background while network activity happens.
 
@@ -127,10 +145,9 @@ def capture_packets(
             pcap._capturing = False
 
 
-@lru_cache(1)
-def _default_interfaces() -> list[str]:
-    """Helper function which calls and caches the default interfaces for a system"""
-    interfaces = [
+def available_interfaces() -> set[str]:
+    """Gets all known interfaces from dumpcap"""
+    return {
         line.split(" ")[1]
         for line in subprocess.check_output(
             "dumpcap -D", shell=True, stderr=subprocess.DEVNULL
@@ -138,7 +155,13 @@ def _default_interfaces() -> list[str]:
         .decode()
         .split("\n")
         if line.strip()
-    ]
-    if "any" in interfaces:
-        return ["any"]
-    return interfaces
+    }
+
+
+@lru_cache(1)
+def _default_interfaces() -> set[str]:
+    """Helper function which calls and caches the default interfaces for a system"""
+    intf = available_interfaces()
+    if "any" in intf:
+        return {"any"}
+    return intf
